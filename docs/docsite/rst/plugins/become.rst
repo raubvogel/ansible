@@ -13,7 +13,7 @@ Become plugins work to ensure that Ansible can use certain privilege escalation 
 commands to work with the target machine as well as the modules required to execute the tasks specified in
 the play.
 
-These utilities (``sudo``, ``su``, ``doas``, etc) generally let you 'become' another user to execute a command
+These utilities (``sudo``, ``su``, ``doas``, and so on) generally let you 'become' another user to execute a command
 with the permissions of that user.
 
 
@@ -47,24 +47,19 @@ Plugin List
 You can use ``ansible-doc -t become -l`` to see the list of available plugins.
 Use ``ansible-doc -t become <plugin name>`` to see specific documentation and examples.
 
-.. toctree:: :maxdepth: 1
-    :glob:
-
-    become/*
-
 .. seealso::
 
-   :doc:`../user_guide/playbooks`
+   :ref:`about_playbooks`
        An introduction to playbooks
-   :doc:`inventory`
+   :ref:`inventory_plugins`
        Ansible inventory plugins
-   :doc:`callback`
+   :ref:`callback_plugins`
        Ansible callback plugins
-   :doc:`../user_guide/playbooks_filters`
+   :ref:`playbooks_filters`
        Jinja2 filter plugins
-   :doc:`../user_guide/playbooks_tests`
+   :ref:`playbooks_tests`
        Jinja2 test plugins
-   :doc:`../user_guide/playbooks_lookups`
+   :ref:`playbooks_lookups`
        Jinja2 lookup plugins
    `User Mailing List <https://groups.google.com/group/ansible-devel>`_
        Have a question?  Stop by the google group!

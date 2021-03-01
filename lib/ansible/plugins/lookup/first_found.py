@@ -5,8 +5,8 @@ from __future__ import (absolute_import, division, print_function)
 __metaclass__ = type
 
 DOCUMENTATION = """
-    lookup: first_found
-    author: Seth Vidal <skvidal@fedoraproject.org>
+    name: first_found
+    author: Seth Vidal (!UNKNOWN) <skvidal@fedoraproject.org>
     version_added: historical
     short_description: return first file found from list
     description:
@@ -29,10 +29,6 @@ DOCUMENTATION = """
         type: boolean
         default: False
         description: Return an empty list if no file is found, instead of an error.
-        deprecated:
-            why: A generic that applies to all errors exists for all lookups.
-            version: "2.8"
-            alternative: The generic ``errors=ignore``
 """
 
 EXAMPLES = """
@@ -43,6 +39,17 @@ EXAMPLES = """
       - "/path/to/foo.txt"
       - "bar.txt"  # will be looked in files/ dir relative to role and/or play
       - "/path/to/biz.txt"
+
+- name: |
+        include tasks only if files exist.  Note the use of query() to return
+        a blank list for the loop if no files are found.
+  import_tasks: '{{ item }}'
+  vars:
+    params:
+      files:
+        - path/tasks.yaml
+        - path/other_tasks.yaml
+  loop: "{{ query('first_found', params, errors='ignore') }}"
 
 - name: |
         copy first existing file found to /some/file,
@@ -81,7 +88,7 @@ EXAMPLES = """
   vars:
     params:
       files:
-        - '{{ansible_os_distribution}}.yml'
+        - '{{ansible_distribution}}.yml'
         - '{{ansible_os_family}}.yml'
         - default.yml
       paths:
@@ -92,6 +99,8 @@ RETURN = """
   _raw:
     description:
       - path to file found
+    type: list
+    elements: path
 """
 import os
 
@@ -118,9 +127,6 @@ class LookupModule(LookupBase):
         if anydict:
             for term in terms:
                 if isinstance(term, dict):
-
-                    if 'skip' in term:
-                        self._display.deprecated('Use errors="ignore" instead of skip', version='2.12')
 
                     files = term.get('files', [])
                     paths = term.get('paths', [])
@@ -166,5 +172,5 @@ class LookupModule(LookupBase):
                 return [path]
         if skip:
             return []
-        raise AnsibleLookupError("No file was found when using first_found. Use the 'skip: true' option to allow this task to be skipped if no "
+        raise AnsibleLookupError("No file was found when using first_found. Use errors='ignore' to allow this task to be skipped if no "
                                  "files are found")

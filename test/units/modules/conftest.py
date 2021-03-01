@@ -1,6 +1,9 @@
 # Copyright (c) 2017 Ansible Project
 # GNU General Public License v3.0+ (see COPYING or https://www.gnu.org/licenses/gpl-3.0.txt)
 
+from __future__ import (absolute_import, division, print_function)
+__metaclass__ = type
+
 import json
 
 import pytest
@@ -20,7 +23,7 @@ def patch_ansible_module(request, mocker):
         if '_ansible_remote_tmp' not in request.param['ANSIBLE_MODULE_ARGS']:
             request.param['ANSIBLE_MODULE_ARGS']['_ansible_remote_tmp'] = '/tmp'
         if '_ansible_keep_remote_files' not in request.param['ANSIBLE_MODULE_ARGS']:
-            request.param['ANSIBLE_MODULE_ARGS']['_ansible_keep_remote_files'] = '/tmp'
+            request.param['ANSIBLE_MODULE_ARGS']['_ansible_keep_remote_files'] = False
         args = json.dumps(request.param)
     else:
         raise Exception('Malformed data to the patch_ansible_module pytest fixture')

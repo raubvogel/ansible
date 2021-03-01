@@ -1,32 +1,54 @@
 OS := $(shell uname -s)
 SITELIB = $(shell python -c "from distutils.sysconfig import get_python_lib; print get_python_lib()"):
-FORMATTER=../bin/plugin_formatter.py
+PLUGIN_FORMATTER=../../hacking/build-ansible.py docs-build
 TESTING_FORMATTER=../bin/testing_formatter.sh
-DUMPER=../bin/dump_keywords.py
-CONFIG_DUMPER=../bin/dump_config.py
-GENERATE_CLI=../bin/generate_man.py
+KEYWORD_DUMPER=../../hacking/build-ansible.py document-keywords
+CONFIG_DUMPER=../../hacking/build-ansible.py document-config
+GENERATE_CLI=../../hacking/build-ansible.py generate-man
+COLLECTION_DUMPER=../../hacking/build-ansible.py collection-meta
 ifeq ($(shell echo $(OS) | egrep -ic 'Darwin|FreeBSD|OpenBSD|DragonFly'),1)
 CPUS ?= $(shell sysctl hw.ncpu|awk '{print $$2}')
 else
 CPUS ?= $(shell nproc)
 endif
 
-# Sets the build output directory if it's not already specified
+# Sets the build output directory for the main docsite if it's not already specified
 ifndef BUILDDIR
 	BUILDDIR = _build
 endif
 
-MODULE_ARGS=
-ifdef MODULES
-	MODULE_ARGS = -l $(MODULES)
-endif
-
+# Backwards compat for separate VARS
 PLUGIN_ARGS=
+ifdef MODULES
+ifndef PLUGINS
+	PLUGIN_ARGS = -l $(MODULES)
+else
+	PLUGIN_ARGS = -l $(MODULES),$(PLUGINS)
+endif
+else
 ifdef PLUGINS
 	PLUGIN_ARGS = -l $(PLUGINS)
 endif
+endif
 
-DOC_PLUGINS ?= become cache callback cliconf connection httpapi inventory lookup shell strategy vars
+ANSIBLE_VERSION_ARGS=
+ifdef ANSIBLE_VERSION
+	ANSIBLE_VERSION_ARGS=--ansible-version=$(ANSIBLE_VERSION)
+endif
+
+DOC_PLUGINS ?= become cache callback cliconf connection httpapi inventory lookup netconf shell strategy vars
+
+PYTHON=python
+# fetch version from project release.py as single source-of-truth
+VERSION := $(shell $(PYTHON) ../../packaging/release/versionhelper/version_helper.py --raw || echo error)
+ifeq ($(findstring error,$(VERSION)), error)
+$(error "version_helper failed")
+endif
+
+MAJOR_VERSION := $(shell $(PYTHON) ../../packaging/release/versionhelper/version_helper.py --majorversion || echo error)
+ifeq ($(findstring error,$(MAJOR_VERSION)), error)
+$(error "version_helper failed to determine major version")
+endif
 
 assertrst:
 ifndef rst
@@ -37,13 +59,47 @@ all: docs
 
 docs: htmldocs
 
-generate_rst: config cli keywords modules plugins testing
+coredocs: core_htmldocs
 
-htmldocs: generate_rst
+generate_rst: collections_meta config cli keywords plugins testing
+core_generate_rst: collections_meta config cli keywords base_plugins testing
+
+# The following two symlinks are necessary to produce two different docsets
+# from the same set of rst files (Ansible the package docs, and core docs).
+# Symlink the relevant index into place for building Ansible docs
+ansible_structure: generate_rst
+	# We must have python and python-packaging for the version_helper
+	# script so use it for version comparison
+	if python -c "import sys, packaging.version as p; sys.exit(not p.Version('$(MAJOR_VERSION)') >  p.Version('2.10'))" ; then \
+		echo "Creating symlinks in generate_rst"; \
+		ln -sf ../rst/ansible_index.rst rst/index.rst; \
+		ln -sf ../sphinx_conf/ansible_conf.py rst/conf.py; \
+	else \
+		echo 'Creating symlinks for older ansible in generate_rst'; \
+		ln -sf ../rst/2.10_index.rst rst/index.rst; \
+		ln -sf ../sphinx_conf/2.10_conf.py rst/conf.py; \
+	fi
+
+# Symlink the relevant index into place for building core docs
+core_structure: core_generate_rst
+	@echo "Creating symlinks in core_generate_rst"
+	-ln -sf ../rst/core_index.rst rst/index.rst
+	-ln -sf ../sphinx_conf/core_conf.py rst/conf.py
+
+htmldocs: ansible_structure
 	CPUS=$(CPUS) $(MAKE) -f Makefile.sphinx html
 
-singlehtmldocs: generate_rst
+core_htmldocs: core_structure
+	CPUS=$(CPUS) $(MAKE) -f Makefile.sphinx html
+
+singlehtmldocs: ansible_structure
 	CPUS=$(CPUS) $(MAKE) -f Makefile.sphinx singlehtml
+
+core_singlehtmldocs: core_structure
+	CPUS=$(CPUS) $(MAKE) -f Makefile.sphinx singlehtml
+
+linkcheckdocs: generate_rst
+	CPUS=$(CPUS) $(MAKE) -f Makefile.sphinx linkcheck
 
 webdocs: docs
 
@@ -54,7 +110,7 @@ clean:
 	-rm -rf $(BUILDDIR)/html
 	-rm -rf htmlout
 	-rm -rf module_docs
-	-rm -rf _build
+	-rm -rf $(BUILDDIR)
 	-rm -f .buildinfo
 	-rm -f objects.inv
 	-rm -rf *.doctrees
@@ -66,38 +122,46 @@ clean:
 	find . -type f \( -name "*~" -or -name "#*" \) -delete
 	find . -type f \( -name "*.swp" \) -delete
 	@echo "Cleaning up generated rst"
-	rm -f rst/modules/*_by_category.rst
-	rm -f rst/modules/list_of_*.rst
-	rm -f rst/modules/*_maintained.rst
-	rm -f rst/modules/*_module.rst
-	rm -f rst/modules/*_plugin.rst
 	rm -f rst/playbooks_directives.rst
-	rm -f rst/plugins/*/*.rst
 	rm -f rst/reference_appendices/config.rst
 	rm -f rst/reference_appendices/playbooks_keywords.rst
+	rm -f rst/dev_guide/collections_galaxy_meta.rst
+	rm -f rst/cli/*.rst
+	for filename in `ls rst/collections/` ; do \
+		if test x"$$filename" != x'all_plugins.rst' ; then \
+			rm -rf "rst/collections/$$filename"; \
+		fi \
+	done
+	@echo "Cleanning up generated ansible_structure"
+	find -type l -delete
+	@echo "Cleaning up legacy generated rst locations"
+	rm -rf rst/modules
+	rm -f rst/plugins/*/*.rst
 
 .PHONY: docs clean
 
+collections_meta: ../templates/collections_galaxy_meta.rst.j2
+	$(COLLECTION_DUMPER) --template-file=../templates/collections_galaxy_meta.rst.j2 --output-dir=rst/dev_guide/ ../../lib/ansible/galaxy/data/collections_galaxy_meta.yml
+
 # TODO: make generate_man output dir cli option
-cli: $(GENERATE_CLI)
+cli:
 	mkdir -p rst/cli
-	PYTHONPATH=../../lib $(GENERATE_CLI) --template-file=../templates/cli_rst.j2 --output-dir=rst/cli/ --output-format rst ../../lib/ansible/cli/*.py
+	$(GENERATE_CLI) --template-file=../templates/cli_rst.j2 --output-dir=rst/cli/ --output-format rst ../../lib/ansible/cli/*.py
 
-keywords: $(FORMATTER) ../templates/playbooks_keywords.rst.j2
-	PYTHONPATH=../../lib $(DUMPER) --template-dir=../templates --output-dir=rst/reference_appendices/ -d ./keyword_desc.yml
+keywords: ../templates/playbooks_keywords.rst.j2
+	$(KEYWORD_DUMPER) --template-dir=../templates --output-dir=rst/reference_appendices/ ../../lib/ansible/keyword_desc.yml
 
-config:
-	PYTHONPATH=../../lib $(CONFIG_DUMPER) --template-file=../templates/config.rst.j2 --output-dir=rst/reference_appendices/ -d ../../lib/ansible/config/base.yml
+config: ../templates/config.rst.j2
+	$(CONFIG_DUMPER) --template-file=../templates/config.rst.j2 --output-dir=rst/reference_appendices/ ../../lib/ansible/config/base.yml
 
-modules: $(FORMATTER) ../templates/plugin.rst.j2
-	PYTHONPATH=../../lib $(FORMATTER) -t rst --template-dir=../templates --module-dir=../../lib/ansible/modules -o rst/modules/ $(MODULE_ARGS)
+# For now, if we're building on devel, just build base docs.  In the future we'll want to build docs that
+# are the latest versions on galaxy (using a different antsibull-docs subcommand)
+plugins:
+	$(PLUGIN_FORMATTER) full -o rst $(ANSIBLE_VERSION_ARGS) $(PLUGIN_ARGS);\
 
-plugins: $(FORMATTER) ../templates/plugin.rst.j2
-	@echo "looping over doc plugins"
-	for plugin in $(DOC_PLUGINS); \
-	do \
-		PYTHONPATH=../../lib $(FORMATTER) -t rst --plugin-type $$plugin --template-dir=../templates --module-dir=../../lib/ansible/plugins/$$plugin -o rst $(PLUGIN_ARGS); \
-	done
+# This only builds the plugin docs included with ansible-base
+base_plugins:
+	$(PLUGIN_FORMATTER) base -o rst $(PLUGIN_ARGS);\
 
 testing:
 	$(TESTING_FORMATTER)

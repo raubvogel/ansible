@@ -6,7 +6,7 @@ from __future__ import (absolute_import, division, print_function)
 __metaclass__ = type
 
 DOCUMENTATION = '''
-    callback: default
+    name: default
     type: stdout
     short_description: default Ansible screen output
     version_added: historical
@@ -18,12 +18,12 @@ DOCUMENTATION = '''
       - set as stdout in configuration
 '''
 
+
 from ansible import constants as C
 from ansible import context
 from ansible.playbook.task_include import TaskInclude
 from ansible.plugins.callback import CallbackBase
 from ansible.utils.color import colorize, hostcolor
-
 
 # These values use ansible.constants for historical reasons, mostly to allow
 # unmodified derivative plugins to work. However, newer options added to the
@@ -33,10 +33,13 @@ from ansible.utils.color import colorize, hostcolor
 
 # these are used to provide backwards compat with old plugins that subclass from default
 # but still don't use the new config system and/or fail to document the options
+# TODO: Change the default of check_mode_markers to True in a future release (2.13)
 COMPAT_OPTIONS = (('display_skipped_hosts', C.DISPLAY_SKIPPED_HOSTS),
                   ('display_ok_hosts', True),
                   ('show_custom_stats', C.SHOW_CUSTOM_STATS),
-                  ('display_failed_stderr', False),)
+                  ('display_failed_stderr', False),
+                  ('check_mode_markers', False),
+                  ('show_per_host_start', False))
 
 
 class CallbackModule(CallbackBase):
@@ -67,6 +70,8 @@ class CallbackModule(CallbackBase):
             try:
                 value = self.get_option(option)
             except (AttributeError, KeyError):
+                self._display.deprecated("'%s' is subclassing DefaultCallback without the corresponding doc_fragment." % self._load_name,
+                                         version='2.14', collection_name='ansible.builtin')
                 value = constant
             setattr(self, option, value)
 
@@ -86,10 +91,14 @@ class CallbackModule(CallbackBase):
 
         else:
             if delegated_vars:
+                if self._display.verbosity < 2 and self.get_option('show_task_path_on_failure'):
+                    self._print_task_path(result._task)
                 self._display.display("fatal: [%s -> %s]: FAILED! => %s" % (result._host.get_name(), delegated_vars['ansible_host'],
                                                                             self._dump_results(result._result)),
                                       color=C.COLOR_ERROR, stderr=self.display_failed_stderr)
             else:
+                if self._display.verbosity < 2 and self.get_option('show_task_path_on_failure'):
+                    self._print_task_path(result._task)
                 self._display.display("fatal: [%s]: FAILED! => %s" % (result._host.get_name(), self._dump_results(result._result)),
                                       color=C.COLOR_ERROR, stderr=self.display_failed_stderr)
 
@@ -101,6 +110,8 @@ class CallbackModule(CallbackBase):
         delegated_vars = result._result.get('_ansible_delegated_vars', None)
 
         if isinstance(result._task, TaskInclude):
+            if self._last_task_banner != result._task._uuid:
+                self._print_task_banner(result._task)
             return
         elif result._result.get('changed', False):
             if self._last_task_banner != result._task._uuid:
@@ -131,7 +142,7 @@ class CallbackModule(CallbackBase):
         else:
             self._clean_results(result._result, result._task.action)
 
-            if (self._display.verbosity > 0 or '_ansible_verbose_always' in result._result) and '_ansible_verbose_override' not in result._result:
+            if self._run_is_verbose(result):
                 msg += " => %s" % (self._dump_results(result._result),)
             self._display.display(msg, color=color)
 
@@ -148,7 +159,7 @@ class CallbackModule(CallbackBase):
                 self._process_items(result)
             else:
                 msg = "skipping: [%s]" % result._host.get_name()
-                if (self._display.verbosity > 0 or '_ansible_verbose_always' in result._result) and '_ansible_verbose_override' not in result._result:
+                if self._run_is_verbose(result):
                     msg += " => %s" % self._dump_results(result._result)
                 self._display.display(msg, color=C.COLOR_SKIP)
 
@@ -181,8 +192,8 @@ class CallbackModule(CallbackBase):
 
         # Preserve task name, as all vars may not be available for templating
         # when we need it later
-        if self._play.strategy == 'free':
-            # Explicitly set to None for strategy 'free' to account for any cached
+        if self._play.strategy in ('free', 'host_pinned'):
+            # Explicitly set to None for strategy free/host_pinned to account for any cached
             # task title from a previous non-free play
             self._last_task_name = None
         else:
@@ -213,11 +224,14 @@ class CallbackModule(CallbackBase):
         if task_name is None:
             task_name = task.get_name().strip()
 
-        self._display.banner(u"%s [%s%s]" % (prefix, task_name, args))
+        if task.check_mode and self.check_mode_markers:
+            checkmsg = " [CHECK MODE]"
+        else:
+            checkmsg = ""
+        self._display.banner(u"%s [%s%s]%s" % (prefix, task_name, args, checkmsg))
+
         if self._display.verbosity >= 2:
-            path = task.get_path()
-            if path:
-                self._display.display(u"task path: %s" % path, color=C.COLOR_DEBUG)
+            self._print_task_path(task)
 
         self._last_task_banner = task._uuid
 
@@ -227,36 +241,44 @@ class CallbackModule(CallbackBase):
     def v2_playbook_on_handler_task_start(self, task):
         self._task_start(task, prefix='RUNNING HANDLER')
 
+    def v2_runner_on_start(self, host, task):
+        if self.get_option('show_per_host_start'):
+            self._display.display(" [started %s on %s]" % (task, host), color=C.COLOR_OK)
+
     def v2_playbook_on_play_start(self, play):
         name = play.get_name().strip()
-        if not name:
-            msg = u"PLAY"
+        if play.check_mode and self.check_mode_markers:
+            checkmsg = " [CHECK MODE]"
         else:
-            msg = u"PLAY [%s]" % name
+            checkmsg = ""
+        if not name:
+            msg = u"PLAY%s" % checkmsg
+        else:
+            msg = u"PLAY [%s]%s" % (name, checkmsg)
 
         self._play = play
 
         self._display.banner(msg)
 
     def v2_on_file_diff(self, result):
-        if self._last_task_banner != result._task._uuid:
-            self._print_task_banner(result._task)
-
         if result._task.loop and 'results' in result._result:
             for res in result._result['results']:
                 if 'diff' in res and res['diff'] and res.get('changed', False):
                     diff = self._get_diff(res['diff'])
                     if diff:
+                        if self._last_task_banner != result._task._uuid:
+                            self._print_task_banner(result._task)
                         self._display.display(diff)
         elif 'diff' in result._result and result._result['diff'] and result._result.get('changed', False):
             diff = self._get_diff(result._result['diff'])
             if diff:
+                if self._last_task_banner != result._task._uuid:
+                    self._print_task_banner(result._task)
                 self._display.display(diff)
 
     def v2_runner_item_on_ok(self, result):
 
         delegated_vars = result._result.get('_ansible_delegated_vars', None)
-        self._clean_results(result._result, result._task.action)
         if isinstance(result._task, TaskInclude):
             return
         elif result._result.get('changed', False):
@@ -282,7 +304,8 @@ class CallbackModule(CallbackBase):
 
         msg += " => (item=%s)" % (self._get_item_label(result._result),)
 
-        if (self._display.verbosity > 0 or '_ansible_verbose_always' in result._result) and '_ansible_verbose_override' not in result._result:
+        self._clean_results(result._result, result._task.action)
+        if self._run_is_verbose(result):
             msg += " => %s" % self._dump_results(result._result)
         self._display.display(msg, color=color)
 
@@ -310,14 +333,15 @@ class CallbackModule(CallbackBase):
 
             self._clean_results(result._result, result._task.action)
             msg = "skipping: [%s] => (item=%s) " % (result._host.get_name(), self._get_item_label(result._result))
-            if (self._display.verbosity > 0 or '_ansible_verbose_always' in result._result) and '_ansible_verbose_override' not in result._result:
+            if self._run_is_verbose(result):
                 msg += " => %s" % self._dump_results(result._result)
             self._display.display(msg, color=C.COLOR_SKIP)
 
     def v2_playbook_on_include(self, included_file):
         msg = 'included: %s for %s' % (included_file._filename, ", ".join([h.name for h in included_file._hosts]))
-        if 'item' in included_file._args:
-            msg += " => (item=%s)" % (self._get_item_label(included_file._args),)
+        label = self._get_item_label(included_file._vars)
+        if label:
+            msg += " => (item=%s)" % label
         self._display.display(msg, color=C.COLOR_SKIP)
 
     def v2_playbook_on_stats(self, stats):
@@ -373,6 +397,9 @@ class CallbackModule(CallbackBase):
                 self._display.display('\tRUN: %s' % self._dump_results(stats.custom['_run'], indent=1).replace('\n', ''))
             self._display.display("", screen_only=True)
 
+        if context.CLIARGS['check'] and self.check_mode_markers:
+            self._display.banner("DRY RUN")
+
     def v2_playbook_on_start(self, playbook):
         if self._display.verbosity > 1:
             from os.path import basename
@@ -389,12 +416,25 @@ class CallbackModule(CallbackBase):
                 if val:
                     self._display.display('%s: %s' % (argument, val), color=C.COLOR_VERBOSE, screen_only=True)
 
+        if context.CLIARGS['check'] and self.check_mode_markers:
+            self._display.banner("DRY RUN")
+
     def v2_runner_retry(self, result):
         task_name = result.task_name or result._task
         msg = "FAILED - RETRYING: %s (%d retries left)." % (task_name, result._result['retries'] - result._result['attempts'])
-        if (self._display.verbosity > 2 or '_ansible_verbose_always' in result._result) and '_ansible_verbose_override' not in result._result:
+        if self._run_is_verbose(result, verbosity=2):
             msg += "Result was: %s" % self._dump_results(result._result)
         self._display.display(msg, color=C.COLOR_DEBUG)
+
+    def v2_runner_on_async_poll(self, result):
+        host = result._host.get_name()
+        jid = result._result.get('ansible_job_id')
+        started = result._result.get('started')
+        finished = result._result.get('finished')
+        self._display.display(
+            'ASYNC POLL on %s: jid=%s started=%s finished=%s' % (host, jid, started, finished),
+            color=C.COLOR_DEBUG
+        )
 
     def v2_playbook_on_notify(self, handler, host):
         if self._display.verbosity > 1:

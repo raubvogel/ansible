@@ -27,7 +27,7 @@ import sys
 from ansible import constants as C
 from ansible import context
 from ansible.cli import CLI
-from ansible.cli.arguments import optparse_helpers as opt_help
+from ansible.cli.arguments import option_helpers as opt_help
 from ansible.executor.task_queue_manager import TaskQueueManager
 from ansible.module_utils._text import to_native, to_text
 from ansible.module_utils.parsing.convert_bool import boolean
@@ -75,12 +75,12 @@ class ConsoleCLI(CLI, cmd.Cmd):
         self.check_mode = None
         self.diff = None
         self.forks = None
+        self.task_timeout = None
 
         cmd.Cmd.__init__(self)
 
     def init_parser(self):
         super(ConsoleCLI, self).init_parser(
-            usage='%prog [<host-pattern>] [options]',
             desc="REPL console for executing Ansible tasks.",
             epilog="This is not a live session/connection, each task executes in the background and returns it's results."
         )
@@ -92,16 +92,19 @@ class ConsoleCLI(CLI, cmd.Cmd):
         opt_help.add_fork_options(self.parser)
         opt_help.add_module_options(self.parser)
         opt_help.add_basedir_options(self.parser)
+        opt_help.add_runtask_options(self.parser)
+        opt_help.add_tasknoplay_options(self.parser)
 
         # options unique to shell
-        self.parser.add_option('--step', dest='step', action='store_true',
-                               help="one-step-at-a-time: confirm each task before running")
+        self.parser.add_argument('pattern', help='host pattern', metavar='pattern', default='all', nargs='?')
+        self.parser.add_argument('--step', dest='step', action='store_true',
+                                 help="one-step-at-a-time: confirm each task before running")
 
-    def post_process_args(self, options, args):
-        options, args = super(ConsoleCLI, self).post_process_args(options, args)
+    def post_process_args(self, options):
+        options = super(ConsoleCLI, self).post_process_args(options)
         display.verbosity = options.verbosity
-        self.validate_conflicts(options, runas_opts=True, vault_opts=True, fork_opts=True)
-        return options, args
+        self.validate_conflicts(options, runas_opts=True, fork_opts=True)
+        return options
 
     def get_names(self):
         return dir(self)
@@ -122,7 +125,7 @@ class ConsoleCLI(CLI, cmd.Cmd):
         else:
             prompt += "$ "
             color = self.NORMAL_PROMPT
-        self.prompt = stringc(prompt, color)
+        self.prompt = stringc(prompt, color, wrap_nonvisible_chars=True)
 
     def list_modules(self):
         modules = set()
@@ -147,7 +150,7 @@ class ConsoleCLI(CLI, cmd.Cmd):
                     self._find_modules_in_path(module)
                 elif module.startswith('__'):
                     continue
-                elif any(module.endswith(x) for x in C.BLACKLIST_EXTS):
+                elif any(module.endswith(x) for x in C.REJECT_EXTS):
                     continue
                 elif module in C.IGNORE_FILES:
                     continue
@@ -182,12 +185,13 @@ class ConsoleCLI(CLI, cmd.Cmd):
 
         result = None
         try:
-            check_raw = module in ('command', 'shell', 'script', 'raw')
+            check_raw = module in C._ACTION_ALLOWS_RAW_ARGS
+            task = dict(action=dict(module=module, args=parse_kv(module_args, check_raw=check_raw)), timeout=self.task_timeout)
             play_ds = dict(
                 name="Ansible Shell",
                 hosts=self.cwd,
                 gather_facts='no',
-                tasks=[dict(action=dict(module=module, args=parse_kv(module_args, check_raw=check_raw)))],
+                tasks=[task],
                 remote_user=self.remote_user,
                 become=self.become,
                 become_user=self.become_user,
@@ -272,8 +276,11 @@ class ConsoleCLI(CLI, cmd.Cmd):
         if not arg:
             display.display('Usage: verbosity <number>')
         else:
-            display.verbosity = int(arg)
-            display.v('verbosity level set to %s' % arg)
+            try:
+                display.verbosity = int(arg)
+                display.v('verbosity level set to %s' % arg)
+            except (TypeError, ValueError) as e:
+                display.error('The verbosity must be a valid integer: %s' % to_text(e))
 
     def do_cd(self, arg):
         """
@@ -354,6 +361,20 @@ class ConsoleCLI(CLI, cmd.Cmd):
         else:
             display.display("Please specify a diff value , e.g. `diff yes`")
 
+    def do_timeout(self, arg):
+        """Set the timeout"""
+        if arg:
+            try:
+                timeout = int(arg)
+                if timeout < 0:
+                    display.error('The timeout must be greater than or equal to 1, use 0 to disable')
+                else:
+                    self.task_timeout = timeout
+            except (TypeError, ValueError) as e:
+                display.error('The timeout must be a valid positive integer, or 0 to disable: %s' % to_text(e))
+        else:
+            display.display('Usage: timeout <seconds>')
+
     def do_exit(self, args):
         """Exits from the console"""
         sys.stdout.write('\n')
@@ -397,7 +418,7 @@ class ConsoleCLI(CLI, cmd.Cmd):
 
     def module_args(self, module_name):
         in_path = module_loader.find_plugin(module_name)
-        oc, a, _, _ = plugin_docs.get_docstring(in_path, fragment_loader)
+        oc, a, _, _ = plugin_docs.get_docstring(in_path, fragment_loader, is_module=True)
         return list(oc['options'].keys())
 
     def run(self):
@@ -408,10 +429,7 @@ class ConsoleCLI(CLI, cmd.Cmd):
         becomepass = None
 
         # hosts
-        if len(context.CLIARGS['args']) != 1:
-            self.pattern = 'all'
-        else:
-            self.pattern = context.CLIARGS['args'][0]
+        self.pattern = context.CLIARGS['pattern']
         self.cwd = self.pattern
 
         # Defaults from the command line
@@ -422,6 +440,7 @@ class ConsoleCLI(CLI, cmd.Cmd):
         self.check_mode = context.CLIARGS['check']
         self.diff = context.CLIARGS['diff']
         self.forks = context.CLIARGS['forks']
+        self.task_timeout = context.CLIARGS['task_timeout']
 
         # dynamically add modules as commands
         self.modules = self.list_modules()

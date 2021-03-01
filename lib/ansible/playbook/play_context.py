@@ -22,12 +22,12 @@ from __future__ import (absolute_import, division, print_function)
 __metaclass__ = type
 
 import os
-import pwd
 import sys
 
 from ansible import constants as C
 from ansible import context
 from ansible.errors import AnsibleError
+from ansible.module_utils.compat.paramiko import paramiko
 from ansible.module_utils.six import iteritems
 from ansible.playbook.attribute import FieldAttribute
 from ansible.playbook.base import Base
@@ -291,17 +291,6 @@ class PlayContext(Base):
         for become_pass_name in C.MAGIC_VARIABLE_MAPPING.get('become_pass'):
             if become_pass_name in variables:
                 break
-        else:  # This is a for-else
-            if new_info.become_method == 'sudo':
-                for sudo_pass_name in C.MAGIC_VARIABLE_MAPPING.get('sudo_pass'):
-                    if sudo_pass_name in variables:
-                        setattr(new_info, 'become_pass', variables[sudo_pass_name])
-                        break
-            elif new_info.become_method == 'su':
-                for su_pass_name in C.MAGIC_VARIABLE_MAPPING.get('su_pass'):
-                    if su_pass_name in variables:
-                        setattr(new_info, 'become_pass', variables[su_pass_name])
-                        break
 
         # make sure we get port defaults if needed
         if new_info.port is None and C.DEFAULT_REMOTE_PORT is not None:
@@ -323,15 +312,11 @@ class PlayContext(Base):
                 elif getattr(new_info, 'connection', None) == 'local' and (not remote_addr_local or not inv_hostname_local):
                     setattr(new_info, 'connection', C.DEFAULT_TRANSPORT)
 
-        # if the final connection type is local, reset the remote_user value to that of the currently logged in user
-        # this ensures any become settings are obeyed correctly
         # we store original in 'connection_user' for use of network/other modules that fallback to it as login user
-        # connection_user to be deprecated once connection=local is removed for
-        # network modules
+        # connection_user to be deprecated once connection=local is removed for, as local resets remote_user
         if new_info.connection == 'local':
             if not new_info.connection_user:
                 new_info.connection_user = new_info.remote_user
-            new_info.remote_user = pwd.getpwuid(os.getuid()).pw_name
 
         # set no_log to default if it was not previously set
         if new_info.no_log is None:
@@ -352,7 +337,7 @@ class PlayContext(Base):
         """ helper function to create privilege escalation commands """
         display.deprecated(
             "PlayContext.make_become_cmd should not be used, the calling code should be using become plugins instead",
-            version="2.12"
+            version="2.12", collection_name='ansible.builtin'
         )
 
         if not cmd or not self.become:
@@ -408,18 +393,12 @@ class PlayContext(Base):
         conn_type = None
         if self._attributes['connection'] == 'smart':
             conn_type = 'ssh'
-            if sys.platform.startswith('darwin') and self.password:
-                # due to a current bug in sshpass on OSX, which can trigger
-                # a kernel panic even for non-privileged users, we revert to
-                # paramiko on that OS when a SSH password is specified
+            # see if SSH can support ControlPersist if not use paramiko
+            if not check_for_controlpersist(self.ssh_executable) and paramiko is not None:
                 conn_type = "paramiko"
-            else:
-                # see if SSH can support ControlPersist if not use paramiko
-                if not check_for_controlpersist(self.ssh_executable):
-                    conn_type = "paramiko"
 
         # if someone did `connection: persistent`, default it to using a persistent paramiko connection to avoid problems
-        elif self._attributes['connection'] == 'persistent':
+        elif self._attributes['connection'] == 'persistent' and paramiko is not None:
             conn_type = 'paramiko'
 
         if conn_type:
